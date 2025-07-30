@@ -1,0 +1,633 @@
+"""
+Recipe & Meal Planning Assistant Chatbot - Fixed for Your Dataset Structure
+Group 4: Ing Teck Wee, Mouli Chattaraj, Milica Gvozdenovich, and Rahul Ravinder
+FIXED: Now works with your specific CSV column structure:
+RecipeId, Name, CookTime, PrepTime, TotalTime, RecipeIngredientParts, 
+RecipeInstructions, AggregatedRating, Calories, etc.
+"""
+
+import gradio as gr
+import time
+import re
+import pandas as pd
+import ast
+from typing import List, Dict, Any, Optional
+import logging
+import zipfile
+import os
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class FixedRecipeAssistant:
+    """
+    Recipe assistant specifically designed for your dataset structure
+    """
+    
+    def __init__(self, dataset_path: str = "./"):
+        self.user_preferences = {}
+        self.dataset_path = dataset_path
+        self.recipes_df = None
+        self.processed_recipes = []
+        self.load_your_dataset()
+
+
+    def load_your_dataset(self):
+        """
+        Load dataset from a zip file or CSV file
+        """
+        try:
+            zip_file_path = f"{self.dataset_path}recipes.zip"
+            csv_file_name = "recipes.csv"
+            
+            if os.path.exists(zip_file_path):
+                logger.info(f"Loading dataset from ZIP file: {zip_file_path}")
+                with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
+                    if csv_file_name in zip_ref.namelist():
+                        with zip_ref.open(csv_file_name) as file:
+                            self.recipes_df = pd.read_csv(file)
+                    else:
+                        raise FileNotFoundError(f"{csv_file_name} not found in zip archive")
+            else:
+                recipes_file = f"{self.dataset_path}recipes.csv"
+                logger.info(f"Loading dataset from CSV file: {recipes_file}")
+                self.recipes_df = pd.read_csv(recipes_file)
+
+            logger.info(f"Dataset loaded: {self.recipes_df.shape[0]} rows, {self.recipes_df.shape[1]} columns")
+            logger.info(f"Columns: {list(self.recipes_df.columns)}")
+
+            self.process_your_dataset()
+            logger.info(f"Successfully processed {len(self.processed_recipes)} recipes")
+
+        except FileNotFoundError as fe:
+            logger.warning(str(fe))
+            self.load_fallback_recipes()
+        except Exception as e:
+            logger.error(f"Error loading dataset: {e}")
+            self.load_fallback_recipes()
+
+    def process_your_dataset(self):
+        """
+        Process dataset using your exact column names
+        """
+        processed_count = 0
+        error_count = 0
+        
+        # Process a reasonable sample (adjust as needed)
+        sample_size = min(5000, len(self.recipes_df))
+        logger.info(f"Processing {sample_size} recipes...")
+        
+        for idx in range(sample_size):
+            try:
+                row = self.recipes_df.iloc[idx]
+                
+                # Extract recipe name from 'Name' column
+                name = self.extract_name(row)
+                if not name:
+                    continue
+                
+                # Extract ingredients from 'RecipeIngredientParts' column
+                ingredients = self.extract_ingredients_from_parts(row)
+                if not ingredients or len(ingredients) < 2:
+                    continue
+                
+                # Extract cooking time from 'TotalTime' column
+                cooking_time = self.extract_total_time(row)
+                
+                # Extract instructions from 'RecipeInstructions' column
+                instructions = self.extract_instructions(row)
+                
+                # Extract rating from 'AggregatedRating' column
+                rating = self.extract_rating(row)
+                
+                # Extract nutrition info
+                nutrition = self.extract_nutrition(row)
+                
+                # Extract servings from 'RecipeServings' column
+                servings = self.extract_servings(row)
+                
+                # Determine difficulty
+                difficulty = self.determine_difficulty(cooking_time, len(ingredients))
+                
+                # Extract dietary tags
+                dietary_tags = self.extract_dietary_tags(ingredients)
+                
+                # Create recipe object
+                recipe = {
+                    "name": name,
+                    "ingredients": ingredients,
+                    "cooking_time": cooking_time,
+                    "difficulty": difficulty,
+                    "dietary_tags": dietary_tags,
+                    "instructions": instructions,
+                    "rating": rating,
+                    "nutrition": nutrition,
+                    "servings": servings,
+                    "original_id": idx,
+                    "category": str(row.get('RecipeCategory', '')),
+                    "keywords": str(row.get('Keywords', ''))
+                }
+                
+                self.processed_recipes.append(recipe)
+                processed_count += 1
+                
+                # Show progress
+                if processed_count % 1000 == 0:
+                    logger.info(f"Processed {processed_count} recipes...")
+                
+                # Show first few successful recipes for debugging
+                if processed_count <= 3:
+                    logger.info(f"✅ Recipe {processed_count}: {name}")
+                    logger.info(f"   Ingredients: {ingredients[:3]}...")
+                    logger.info(f"   Time: {cooking_time} min")
+                    logger.info(f"   Rating: {rating}")
+                
+            except Exception as e:
+                error_count += 1
+                if error_count <= 5:  # Show first few errors
+                    logger.debug(f"Error processing recipe {idx}: {e}")
+                continue
+        
+        logger.info(f"✅ Successfully processed: {processed_count}")
+        logger.info(f"❌ Errors encountered: {error_count}")
+        if processed_count + error_count > 0:
+            logger.info(f"📊 Success rate: {processed_count/(processed_count+error_count)*100:.1f}%")
+    
+    def extract_name(self, row):
+        """Extract recipe name from 'Name' column"""
+        name = row.get('Name')
+        if pd.notna(name) and isinstance(name, str) and len(name.strip()) > 2:
+            return name.strip()
+        return None
+    
+    def extract_ingredients_from_parts(self, row):
+        """Extract ingredients from 'RecipeIngredientParts' column"""
+        ingredients_raw = row.get('RecipeIngredientParts')
+
+        if pd.isna(ingredients_raw):
+            return []
+
+        try:
+            # Initialize ingredient list
+            ingredients = []
+
+            # Handle R-style vector: c("ingredient1", "ingredient2", ...)
+            if isinstance(ingredients_raw, str) and ingredients_raw.strip().startswith('c('):
+                cleaned = ingredients_raw.replace('c(', '').rstrip(')')
+                ingredients = [s.strip().strip('"') for s in cleaned.split(',')]
+
+            # Handle JSON-style list
+            elif isinstance(ingredients_raw, str) and ingredients_raw.strip().startswith('['):
+                ingredients = ast.literal_eval(ingredients_raw)
+
+            # Handle plain string with commas or semicolons
+            elif isinstance(ingredients_raw, str):
+                ingredients = [ing.strip() for ing in re.split(r'[,\n;]', ingredients_raw) if ing.strip()]
+
+            # Fallback for non-string types
+            elif isinstance(ingredients_raw, list):
+                ingredients = ingredients_raw
+            else:
+                ingredients = [str(ingredients_raw)]
+
+            # Clean ingredients - remove quantities, measurements, parentheses
+            cleaned = []
+            for ing in ingredients[:15]:  # Limit to 15 ingredients
+                if isinstance(ing, str) and len(ing.strip()) > 1:
+                    cleaned_ing = ing.strip().lower()
+                    cleaned_ing = re.sub(r'^\d+[\s\/\d]*\s*(cups?|tbsp|tsp|oz|lbs?|pounds?|ounces?|tablespoons?|teaspoons?|cloves?|slices?|pieces?)\s*', '', cleaned_ing)
+                    cleaned_ing = re.sub(r'^\d+[\s\/\d]*\s*', '', cleaned_ing)
+                    cleaned_ing = re.sub(r'\([^)]*\)', '', cleaned_ing)
+                    cleaned_ing = re.sub(r',.*$', '', cleaned_ing)
+                    cleaned_ing = cleaned_ing.strip()
+                    if len(cleaned_ing) > 2:
+                        cleaned.append(cleaned_ing)
+
+            return cleaned
+
+        except Exception as e:
+            logger.debug(f"Error parsing ingredients: {e}")
+            return []
+
+    
+    def extract_total_time(self, row):
+        """Extract cooking time from 'TotalTime' column"""
+        total_time = row.get('TotalTime')
+        
+        if pd.notna(total_time):
+            try:
+                # Handle ISO 8601 duration format (PT30M) or plain numbers
+                if isinstance(total_time, str):
+                    if total_time.startswith('PT'):
+                        # Parse ISO 8601 duration (e.g., PT30M, PT1H30M)
+                        minutes = 0
+                        if 'H' in total_time:
+                            hours = int(re.search(r'(\d+)H', total_time).group(1))
+                            minutes += hours * 60
+                        if 'M' in total_time:
+                            mins = int(re.search(r'(\d+)M', total_time).group(1))
+                            minutes += mins
+                        return max(5, min(300, minutes))  # 5 min to 5 hours
+                    else:
+                        # Try to extract number from string
+                        numbers = re.findall(r'\d+', total_time)
+                        if numbers:
+                            return max(5, min(300, int(numbers[0])))
+                else:
+                    # Direct number
+                    return max(5, min(300, int(float(total_time))))
+            except:
+                pass
+        
+        # Fallback to PrepTime + CookTime
+        prep_time = row.get('PrepTime', 0)
+        cook_time = row.get('CookTime', 0)
+        
+        try:
+            total = 0
+            for time_val in [prep_time, cook_time]:
+                if pd.notna(time_val):
+                    if isinstance(time_val, str) and 'PT' in time_val:
+                        if 'M' in time_val:
+                            mins = int(re.search(r'(\d+)M', time_val).group(1))
+                            total += mins
+                    else:
+                        total += int(float(time_val))
+            
+            if total > 0:
+                return max(5, min(300, total))
+        except:
+            pass
+        
+        return 30  # Default
+    
+    def extract_instructions(self, row):
+        """Extract instructions from 'RecipeInstructions' column"""
+        instructions = row.get('RecipeInstructions')
+        
+        if pd.notna(instructions):
+            try:
+                instructions_str = str(instructions).strip()
+                
+                # Handle R-style vector: c("step1", "step2", ...)
+                if instructions_str.startswith('c('):
+                    try:
+                        cleaned = instructions_str.replace('c(', '').rstrip(')')
+                        steps = [s.strip().strip('"') for s in cleaned.split(',')]
+                        return '\n'.join([f"{i+1}. {s}" for i, s in enumerate(steps)])
+                    except:
+                        pass
+
+                # Handle JSON-style list: ["step1", "step2"] or [{"text": "..."}]
+                if instructions_str.startswith('['):
+                    steps = ast.literal_eval(instructions_str)
+                    if isinstance(steps, list):
+                        numbered_steps = []
+                        for i, step in enumerate(steps, 1):
+                            if isinstance(step, dict) and 'text' in step:
+                                numbered_steps.append(f"{i}. {step['text']}")
+                            else:
+                                numbered_steps.append(f"{i}. {str(step)}")
+                        return '\n'.join(numbered_steps)
+                
+                # Default fallback: plain text
+                return instructions_str[:500] + "..." if len(instructions_str) > 500 else instructions_str
+            
+            except Exception as e:
+                return str(instructions)[:500] + "..." if len(str(instructions)) > 500 else str(instructions)
+
+        return "Instructions not available"
+
+
+    
+    def extract_rating(self, row):
+        """Extract rating from 'AggregatedRating' column"""
+        rating = row.get('AggregatedRating')
+        if pd.notna(rating):
+            try:
+                rating_val = float(rating)
+                return max(0, min(5, rating_val))  # Ensure 0-5 range
+            except:
+                pass
+        return None
+    
+    def extract_nutrition(self, row):
+        """Extract nutrition info from nutrition columns"""
+        nutrition = {}
+        
+        nutrition_mappings = {
+            'calories': 'Calories',
+            'fat': 'FatContent', 
+            'saturated_fat': 'SaturatedFatContent',
+            'cholesterol': 'CholesterolContent',
+            'sodium': 'SodiumContent',
+            'carbohydrates': 'CarbohydrateContent',
+            'fiber': 'FiberContent',
+            'sugar': 'SugarContent',
+            'protein': 'ProteinContent'
+        }
+        
+        for key, col in nutrition_mappings.items():
+            value = row.get(col)
+            if pd.notna(value):
+                try:
+                    nutrition[key] = float(value)
+                except:
+                    pass
+        
+        return nutrition
+    
+    def extract_servings(self, row):
+        """Extract servings from 'RecipeServings' column"""
+        servings = row.get('RecipeServings')
+        if pd.notna(servings):
+            try:
+                return max(1, int(float(servings)))
+            except:
+                pass
+        
+        # Fallback to RecipeYield
+        yield_val = row.get('RecipeYield')
+        if pd.notna(yield_val):
+            try:
+                return max(1, int(float(yield_val)))
+            except:
+                pass
+        
+        return 4  # Default
+    
+    def determine_difficulty(self, cooking_time: int, n_ingredients: int) -> str:
+        """Determine difficulty based on time and ingredients"""
+        if cooking_time <= 20 and n_ingredients <= 5:
+            return "easy"
+        elif cooking_time <= 45 and n_ingredients <= 10:
+            return "medium"
+        else:
+            return "hard"
+    
+    def extract_dietary_tags(self, ingredients: List[str]) -> List[str]:
+        """Extract dietary tags from ingredients"""
+        tags = []
+        ingredients_str = ' '.join(ingredients).lower()
+        
+        # Check for meat
+        meat_keywords = ['chicken', 'beef', 'pork', 'lamb', 'fish', 'salmon', 'tuna', 'turkey', 'bacon', 'ham', 'meat']
+        has_meat = any(meat in ingredients_str for meat in meat_keywords)
+        
+        # Check for dairy
+        dairy_keywords = ['milk', 'cheese', 'butter', 'cream', 'yogurt', 'sour cream']
+        has_dairy = any(dairy in ingredients_str for dairy in dairy_keywords)
+        
+        # Check for eggs
+        has_eggs = 'egg' in ingredients_str
+        
+        # Check for gluten
+        gluten_keywords = ['flour', 'wheat', 'bread', 'pasta', 'noodle']
+        has_gluten = any(gluten in ingredients_str for gluten in gluten_keywords)
+        
+        if not has_meat:
+            tags.append('vegetarian')
+        
+        if not has_meat and not has_dairy and not has_eggs:
+            tags.append('vegan')
+        
+        if not has_gluten:
+            tags.append('gluten-free')
+        
+        return tags
+    
+    def load_fallback_recipes(self):
+        """Load fallback recipes if dataset loading fails"""
+        logger.info("Loading fallback hardcoded recipes...")
+        self.processed_recipes = [
+            {
+                "name": "Chicken Fried Rice",
+                "ingredients": ["chicken", "rice", "eggs", "soy sauce", "garlic", "oil", "onions"],
+                "cooking_time": 25,
+                "difficulty": "easy",
+                "dietary_tags": ["gluten-free"],
+                "instructions": "1. Cook rice and set aside\n2. Scramble eggs in a pan, remove\n3. Cook chicken pieces until done\n4. Add rice, eggs, and soy sauce\n5. Stir fry everything together",
+                "rating": 4.5,
+                "nutrition": {"calories": 320},
+                "servings": 4
+            }
+        ]
+    
+    # Rest of the methods remain the same...
+    def extract_ingredients(self, text: str) -> List[str]:
+        """Extract ingredients from user input"""
+        text = text.lower()
+        
+        # Build vocabulary from loaded recipes
+        common_ingredients = set()
+        
+        # Get common ingredients from processed recipes
+        for recipe in self.processed_recipes[:1000]:  # Sample for performance
+            for ing in recipe['ingredients']:
+                words = ing.split()
+                for word in words:
+                    if len(word) > 2:
+                        common_ingredients.add(word)
+        
+        # Add fallback ingredients
+        fallback_ingredients = [
+            "chicken", "beef", "pork", "salmon", "fish", "eggs", "rice", "pasta", 
+            "bread", "tomatoes", "onions", "garlic", "cheese", "milk", "butter"
+        ]
+        common_ingredients.update(fallback_ingredients)
+        
+        found_ingredients = []
+        for ingredient in common_ingredients:
+            pattern = r'\b' + re.escape(ingredient) + r'\b'
+            if re.search(pattern, text):
+                found_ingredients.append(ingredient)
+
+        
+        return found_ingredients
+    
+    def extract_preferences(self, text: str) -> Dict[str, Any]:
+        """Extract dietary preferences from text"""
+        text = text.lower()
+        preferences = {}
+        
+        if any(phrase in text for phrase in ["i'm vegetarian", "i am vegetarian", "vegetarian"]):
+            preferences["vegetarian"] = True
+        if any(phrase in text for phrase in ["i'm vegan", "i am vegan", "vegan"]):
+            preferences["vegan"] = True
+        if any(phrase in text for phrase in ["gluten free", "gluten-free", "no gluten"]):
+            preferences["gluten_free"] = True
+        
+        if any(word in text for word in ["quick", "fast"]):
+            preferences["max_time"] = 20
+        if any(word in text for word in ["easy", "simple"]):
+            preferences["difficulty"] = "easy"
+        
+        return preferences
+    
+    def find_matching_recipes(self, ingredients: List[str], preferences: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Find matching recipes"""
+        if not ingredients:
+            return []
+        
+        matching_recipes = []
+        
+        for recipe in self.processed_recipes:
+            # Calculate ingredient matches
+            recipe_ingredients = [ing.lower() for ing in recipe["ingredients"]]
+            matches = 0
+            
+            for user_ing in ingredients:
+                for recipe_ing in recipe_ingredients:
+                    if user_ing in recipe_ing or recipe_ing in user_ing:
+                        matches += 1
+                        break
+            
+            if matches == 0:
+                continue
+            
+            # Apply dietary filters
+            if preferences.get("vegetarian") and "vegetarian" not in recipe["dietary_tags"]:
+                continue
+            if preferences.get("vegan") and "vegan" not in recipe["dietary_tags"]:
+                continue
+            if preferences.get("gluten_free") and "gluten-free" not in recipe["dietary_tags"]:
+                continue
+            
+            # Apply time and difficulty filters
+            if preferences.get("max_time") and recipe["cooking_time"] > preferences["max_time"]:
+                continue
+            if preferences.get("difficulty") and recipe["difficulty"] != preferences["difficulty"]:
+                continue
+            
+            # Calculate score
+            ingredient_score = matches / len(ingredients)
+            rating_score = (recipe.get('rating', 3.0) or 3.0) / 5.0
+            final_score = (ingredient_score * 0.7) + (rating_score * 0.3)
+            
+            recipe_with_score = recipe.copy()
+            recipe_with_score["match_score"] = final_score
+            matching_recipes.append(recipe_with_score)
+        
+        # Sort by score
+        matching_recipes.sort(key=lambda x: x["match_score"], reverse=True)
+        return matching_recipes[:5]
+    
+    def format_recipe_response(self, recipes: List[Dict[str, Any]], ingredients: List[str]) -> str:
+        """Format recipe response"""
+        if not recipes:
+            return f"I couldn't find recipes using {', '.join(ingredients)}. Try different ingredients!"
+        
+        response = f"Great! I found recipes using {', '.join(ingredients)}:\n\n"
+        
+        for i, recipe in enumerate(recipes, 1):
+            response += f"**{i}. {recipe['name']}**\n"
+            response += f"⏱️ Time: {recipe['cooking_time']} minutes\n"
+            response += f"📊 Difficulty: {recipe['difficulty'].title()}\n"
+            
+            if recipe.get('rating'):
+                response += f"⭐ Rating: {recipe['rating']:.1f}/5.0\n"
+            
+            response += f"🍽️ Servings: {recipe['servings']}\n"
+            
+            if recipe['dietary_tags']:
+                response += f"🥗 Dietary: {', '.join(recipe['dietary_tags'])}\n"
+            
+            nutrition = recipe.get('nutrition', {})
+            if nutrition.get('calories'):
+                response += f"🔥 Calories: {nutrition['calories']:.0f}\n"
+            
+            response += f"\n📝 Instructions:\n{recipe['instructions'][:200]}...\n"
+            response += f"🛒 Ingredients: {', '.join(recipe['ingredients'][:5])}{'...' if len(recipe['ingredients']) > 5 else ''}\n\n"
+        
+        return response
+
+# Initialize the recipe assistant
+print("🍳 Loading Recipe Assistant with your dataset...")
+recipe_assistant = FixedRecipeAssistant()
+
+def add_user_message(history, message):
+    return history + [{"role": "user", "content": message}]
+
+def bot_response(history: list):
+    if not history:
+        return history
+    
+    user_message = history[-1]["content"].lower().strip()
+    
+    # Handle greetings
+    if any(user_message.startswith(greeting) for greeting in ["hello", "hi", "hey"]):
+        greeting_response = f"""Hello! I'm your Recipe & Meal Planning Assistant!
+🎉 Successfully loaded {len(recipe_assistant.processed_recipes):,} recipes from your dataset!
+I can help you:
+• Find recipes from your large recipe database
+• Consider dietary preferences (vegetarian, vegan, gluten-free)
+• Show nutrition information and user ratings
+• Filter by cooking time and difficulty
+Just tell me what ingredients you have!"""
+        
+        history.append({"role": "assistant", "content": ""})
+        for character in greeting_response:
+            history[-1]["content"] += character
+            time.sleep(0.005)
+            yield history
+        return
+    
+    # Process recipe request
+    ingredients = recipe_assistant.extract_ingredients(user_message)
+    preferences = recipe_assistant.extract_preferences(user_message)
+    
+    if not ingredients:
+        response = f"I have {len(recipe_assistant.processed_recipes):,} recipes ready! Please tell me what ingredients you have. For example: 'I have chicken and rice'"
+    else:
+        matching_recipes = recipe_assistant.find_matching_recipes(ingredients, preferences)
+        response = recipe_assistant.format_recipe_response(matching_recipes, ingredients)
+    
+    history.append({"role": "assistant", "content": ""})
+    for character in response:
+        history[-1]["content"] += character
+        time.sleep(0.003)
+        yield history
+
+# Gradio interface
+with gr.Blocks(title="Recipe & Meal Planning Assistant") as demo:
+    gr.Markdown(f"""
+    # 🍳 Recipe & Meal Planning Assistant
+    
+    Tell me what ingredients you have and I'll find perfect recipes for you!
+    """)
+    
+    clear = gr.Button("Clear Chat", variant="secondary")
+    chatbot = gr.Chatbot(type="messages", height=500)
+    msg = gr.Textbox(
+        placeholder="Enter ingredients you have (e.g., 'chicken and rice')...",
+        show_label=False
+    )
+    
+    gr.Examples(
+        examples=[
+            "Hello!",
+            "I have chicken and rice", 
+            "pasta and tomatoes, vegetarian",
+            "I have eggs and want something quick",
+            "salmon and vegetables, under 30 minutes",
+            "beef and potatoes for dinner"
+        ],
+        inputs=msg
+    )
+    
+    def user_submit(message, history):
+        return "", add_user_message(history, message)
+    
+    def clear_chat():
+        recipe_assistant.user_preferences = {}
+        return None
+    
+    msg.submit(user_submit, [msg, chatbot], [msg, chatbot], queue=False).then(
+        bot_response, chatbot, chatbot
+    )
+    
+    clear.click(clear_chat, None, chatbot, queue=False)
+
+if __name__ == "__main__":
+    demo.launch()
